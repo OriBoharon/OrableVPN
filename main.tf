@@ -15,6 +15,11 @@ variable "duck_token"     {
   type = string
   sensitive = true 
   }
+variable "wg_admin_password" {
+  type = string
+  sensitive = true
+  description = "WireGuard Easy web UI password"
+}
 
 
 # 2. Networking (The "VPC")
@@ -131,52 +136,8 @@ resource "oci_identity_policy" "vpn_vps_policy" {
   name           = "vps_vault_access"
   description    = "Allows the VPN VPS to retrieve secrets from the Vault at boot time"
   statements     = [
-    "Allow dynamic-group vpn_vps_access_group to read secret-bundle in compartment id ${var.compartment_id}",
-    "Allow dynamic-group vpn_vps_access_group to use logging-family in compartment id ${var.compartment_id}"
+    "Allow dynamic-group vpn_vps_access_group to read secret-bundle in compartment id ${var.compartment_id}"
   ]
-}
-
-# Create a Log Group
-resource "oci_logging_log_group" "vpn_log_group" {
-  compartment_id = var.compartment_id
-  display_name   = "vpn_infrastructure_logs"
-}
-
-# Create the Log object
-resource "oci_logging_log" "vps_deploy_log" {
-  display_name = "vps_boot_script_log"
-  log_group_id = oci_logging_log_group.vpn_log_group.id
-  log_type     = "CUSTOM" # Custom means we are feeding it files from our script
-}
-
-# Tell the Agent WHERE to look on the VPS
-resource "oci_logging_unified_agent_configuration" "vps_agent_config" {
-  compartment_id = var.compartment_id
-  description    = "Collects deployment logs from the VPN VPS"
-  display_name   = "vpn_agent_config"
-  is_enabled     = true
-  
-  service_configuration {
-    configuration_type = "LOGGING"
-    sources {
-      source_type = "LOG_TAIL"
-      channels    = ["vpn_vps_deploy"]
-      paths       = ["/var/log/vpn-deploy.log"] # This file must match your setup.tftpl
-      name        = "vps_boot_file"
-
-      parser {
-        parser_type = "NONE" # This is the missing piece
-      }
-    }
-
-    destination {
-      log_object_id = oci_logging_log.vps_deploy_log.id
-    }
-  }
-
-  group_association {
-    group_list = [oci_identity_dynamic_group.vps_dg.id]
-  }
 }
 
 # --- COMPUTE: THE VPS ---
@@ -212,7 +173,10 @@ resource "oci_core_instance" "vpn_vps" {
       secret_ocid            = oci_vault_secret.wg_key_secret.id
       duck_domain            = var.duck_domain
       duck_token             = var.duck_token
+      wg_admin_password      = var.wg_admin_password
       docker_compose_content = file("docker-compose.yaml")
+      ssh_host_key_private = file("keys/host_key")
+      ssh_host_key_public  = file("keys/host_key.pub")
     }))
   }
 

@@ -1,0 +1,19 @@
+# Terraform State
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+tf.plan
+
+# Variables & Secrets
+*.tfvars
+*.tfvars.json
+*.key
+*.pem
+keys/
+
+# Local Logs
+*.log
+
+# AI Assistant Files
+.codex

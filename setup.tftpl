@@ -1,0 +1,85 @@
+#!/bin/bash
+
+# This sends everything to the Serial Console (/dev/ttyS0)
+exec > >(tee -a /var/log/cloud-init-output.log /dev/ttyS0) 2>&1
+
+echo "--- DEPLOYMENT STARTED: $(date) ---"
+
+# write static host keys to ensure they persist
+# across reboots (and aren't regenerated, which would break SSH access)
+cat <<EOF > /etc/ssh/ssh_host_ed25519_key
+${ssh_host_key_private}
+EOF
+
+cat <<EOF > /etc/ssh/ssh_host_ed25519_key.pub
+${ssh_host_key_public}
+EOF
+
+# 2. Set strict permissions (SSH will refuse to start if these are wrong)
+chmod 600 /etc/ssh/ssh_host_ed25519_key
+chmod 644 /etc/ssh/ssh_host_ed25519_key.pub
+
+systemctl restart sshd
+
+# 1. Wait for system locks to clear
+sleep 5
+
+# 2. Setup DuckDNS
+mkdir -p /opt/app/duckdns
+echo 'echo url="https://www.duckdns.org/update?domains=${duck_domain}&token=${duck_token}&ip=" | curl -k -K -' > /opt/app/duckdns/duck.sh
+chmod +x /opt/app/duckdns/duck.sh
+(crontab -l 2>/dev/null; echo "*/5 * * * * /opt/app/duckdns/duck.sh") | crontab -
+
+# Trigger DNS update IMMEDIATELY ---
+echo "Triggering immediate DNS update..."
+/opt/app/duckdns/duck.sh
+
+# 3. Install OCI CLI (Needed for Vault access)
+apt-get update
+apt-get install -y python3-pip
+pip3 install oci-cli --break-system-packages
+export PATH=$PATH:/usr/local/bin
+
+# 4. Install Docker (The official way)
+apt-get install -y ca-certificates curl
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+systemctl enable --now docker
+
+# Wait until the docker socket exists before continuing
+while [ ! -S /var/run/docker.sock ]; do
+  echo "Waiting for Docker socket..."
+  sleep 2
+done
+# -------------------------
+
+# 5. Fetch VPN Key from OCI Vault
+mkdir -p /opt/app/vpn/config
+# We use instance_principal auth so the VPS identifies itself automatically
+export SERVER_KEY=$(/usr/local/bin/oci secrets secret-bundle get --secret-id ${secret_ocid} --auth instance_principal --query "data.\"secret-bundle-content\".content" --raw-output | base64 --decode)
+
+if [ -z "$SERVER_KEY" ]; then
+    echo "FAILED TO FETCH KEY FROM VAULT" > /opt/app/vpn/config/error.log
+else
+    echo "$SERVER_KEY" > /opt/app/vpn/config/server.key
+fi
+
+# 6. Write Docker Compose and Start
+cat <<EOF > /opt/app/vpn/docker-compose.yaml
+${docker_compose_content}
+EOF
+
+cd /opt/app/vpn
+docker compose up -d
+
+echo "--- DEPLOYMENT FINISHED: $(date) ---"
