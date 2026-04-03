@@ -34,13 +34,8 @@ chmod +x /opt/app/duckdns/duck.sh
 echo "Triggering immediate DNS update..."
 /opt/app/duckdns/duck.sh
 
-# 3. Install OCI CLI (Needed for Vault access)
+# 3. Install Docker (The official way)
 apt-get update
-apt-get install -y python3-pip
-pip3 install oci-cli --break-system-packages
-export PATH=$PATH:/usr/local/bin
-
-# 4. Install Docker (The official way)
 apt-get install -y ca-certificates curl
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
@@ -61,21 +56,31 @@ while [ ! -S /var/run/docker.sock ]; do
   echo "Waiting for Docker socket..."
   sleep 2
 done
-# -------------------------
 
-# 5. Fetch VPN Key from OCI Vault
-mkdir -p /opt/app/vpn/config
-# We use instance_principal auth so the VPS identifies itself automatically
-export SERVER_KEY=$(/usr/local/bin/oci secrets secret-bundle get --secret-id ${secret_ocid} --auth instance_principal --query "data.\"secret-bundle-content\".content" --raw-output | base64 --decode)
+# 4. Mount persistent VPN data volume
+VPN_DATA_DEVICE="${vpn_data_device}"
+VPN_DATA_MOUNT="/opt/app/vpn/config"
 
-if [ -z "$SERVER_KEY" ]; then
-    echo "FAILED TO FETCH KEY FROM VAULT" > /opt/app/vpn/config/error.log
-else
-    echo "$SERVER_KEY" > /opt/app/vpn/config/server.key
+while [ ! -b "$VPN_DATA_DEVICE" ]; do
+  echo "Waiting for VPN data device at $VPN_DATA_DEVICE..."
+  sleep 2
+done
+
+if ! blkid "$VPN_DATA_DEVICE" >/dev/null 2>&1; then
+  mkfs.ext4 -F "$VPN_DATA_DEVICE"
 fi
 
-# 6. Write Docker Compose and Start
-cat <<EOF > /opt/app/vpn/docker-compose.yaml
+mkdir -p "$VPN_DATA_MOUNT"
+VPN_DATA_UUID=$(blkid -s UUID -o value "$VPN_DATA_DEVICE")
+if ! grep -q "$VPN_DATA_UUID" /etc/fstab; then
+  echo "UUID=$VPN_DATA_UUID $VPN_DATA_MOUNT ext4 defaults,nofail 0 2" >> /etc/fstab
+fi
+
+mountpoint -q "$VPN_DATA_MOUNT" || mount "$VPN_DATA_MOUNT"
+
+# 5. Write Docker Compose and Start
+mkdir -p /opt/app/vpn
+cat <<'EOF' > /opt/app/vpn/docker-compose.yaml
 ${docker_compose_content}
 EOF
 

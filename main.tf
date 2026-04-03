@@ -1,24 +1,28 @@
 # PROVIDER CONFIG
 provider "oci" {
-  region = "il-jerusalem-1"
+  region           = var.region
+  tenancy_ocid     = var.tenancy_ocid
+  user_ocid        = var.user_ocid
+  fingerprint      = var.fingerprint
+  private_key_path = var.private_key_path
 }
 
 # VARIABLES (Pass these in via a .tfvars file or env vars)
 variable "compartment_id" { type = string }
-variable "tenancy_id"     { type = string }
-variable "wg_private_key" { 
-  type = string 
-  sensitive = true
-   }
+variable "region"         { type = string }
+variable "tenancy_ocid"   { type = string }
+variable "user_ocid"        { type = string }
+variable "fingerprint"    { type = string }
+variable "private_key_path" { type = string }
 variable "duck_domain"    { type = string }
 variable "duck_token"     { 
   type = string
   sensitive = true 
   }
-variable "wg_admin_password" {
+variable "wg_admin_password_hash" {
   type = string
   sensitive = true
-  description = "WireGuard Easy web UI password"
+  description = "WireGuard Easy web UI password hash"
 }
 
 
@@ -94,50 +98,11 @@ data "oci_core_images" "ubuntu_latest" {
   sort_order               = "DESC"
 }
 
-
-# --- SECURITY: VAULT & SECRET ---
-resource "oci_kms_vault" "vpn_vault" {
-  compartment_id = var.compartment_id
-  display_name   = "vpn_stateless_vault"
-  vault_type     = "DEFAULT"
-}
-
-resource "oci_kms_key" "vpn_master_key" {
+resource "oci_core_volume" "vpn_data" {
+  availability_domain = data.oci_identity_availability_domain.ad.name
   compartment_id      = var.compartment_id
-  display_name        = "vpn_master_key"
-  management_endpoint = oci_kms_vault.vpn_vault.management_endpoint
-  key_shape { 
-    algorithm = "AES"
-    length = 32 
-    }
-}
-
-resource "oci_vault_secret" "wg_key_secret" {
-  compartment_id = var.compartment_id
-  vault_id       = oci_kms_vault.vpn_vault.id
-  key_id         = oci_kms_key.vpn_master_key.id
-  secret_name    = "wg_private_key"
-  secret_content {
-    content_type = "BASE64"
-    content      = base64encode(var.wg_private_key)
-  }
-}
-
-# --- IDENTITY: DYNAMIC GROUP & POLICY ---
-resource "oci_identity_dynamic_group" "vps_dg" {
-  compartment_id = var.tenancy_id # Dynamic groups must be in tenancy root
-  description    = "The dynamic VPN group identity"
-  name           = "vpn_vps_access_group"
-  matching_rule  = "instance.compartment.id = '${var.compartment_id}'"
-}
-
-resource "oci_identity_policy" "vpn_vps_policy" {
-  compartment_id = var.compartment_id
-  name           = "vps_vault_access"
-  description    = "Allows the VPN VPS to retrieve secrets from the Vault at boot time"
-  statements     = [
-    "Allow dynamic-group vpn_vps_access_group to read secret-bundle in compartment id ${var.compartment_id}"
-  ]
+  display_name        = "vpn_data"
+  size_in_gbs         = 50
 }
 
 # --- COMPUTE: THE VPS ---
@@ -170,18 +135,26 @@ resource "oci_core_instance" "vpn_vps" {
   metadata = {
     ssh_authorized_keys = file(pathexpand("~/.ssh/id_rsa.pub"))
     user_data = base64encode(templatefile("setup.tftpl", {
-      secret_ocid            = oci_vault_secret.wg_key_secret.id
       duck_domain            = var.duck_domain
       duck_token             = var.duck_token
-      wg_admin_password      = var.wg_admin_password
-      docker_compose_content = file("docker-compose.yaml")
+      vpn_data_device        = "/dev/oracleoci/oraclevdb"
+      docker_compose_content = templatefile("docker-compose.yaml", {
+        duck_domain             = var.duck_domain
+        wg_admin_password_hash  = replace(var.wg_admin_password_hash, "$", "$$")
+      })
       ssh_host_key_private = file("keys/host_key")
       ssh_host_key_public  = file("keys/host_key.pub")
     }))
   }
+}
 
-
-  depends_on = [oci_identity_policy.vpn_vps_policy, oci_vault_secret.wg_key_secret]
+resource "oci_core_volume_attachment" "vpn_data_attachment" {
+  attachment_type                     = "paravirtualized"
+  device                              = "/dev/oracleoci/oraclevdb"
+  display_name                        = "vpn_data_attachment"
+  instance_id                         = oci_core_instance.vpn_vps.id
+  volume_id                           = oci_core_volume.vpn_data.id
+  is_pv_encryption_in_transit_enabled = false
 }
 
 data "oci_identity_availability_domain" "ad" {
