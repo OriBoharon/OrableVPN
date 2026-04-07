@@ -11,6 +11,7 @@ tf.plan
 *.key
 *.pem
 keys/
+scripts/.state/
 
 # Local Logs
 *.log

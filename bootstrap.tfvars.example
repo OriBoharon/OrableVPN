@@ -1,0 +1,21 @@
+region                  = "us-ashburn-1"
+tenancy_ocid            = "ocid1.tenancy.oc1..replace_me"
+compartment_id          = "ocid1.compartment.oc1..replace_me"
+user_ocid               = "ocid1.user.oc1..replace_me"
+fingerprint             = "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
+private_key_path        = "~/.oci/oci_api_key.pem"
+ssh_authorized_keys_path = "~/.ssh/id_ed25519.pub"
+duck_domain             = "example.duckdns.org"
+duck_token              = "replace_me"
+# generated with:
+# docker run --rm ghcr.io/wg-easy/wg-easy:14 wgpw YOUR_PASSWORD | sed -E "s/^PASSWORD_HASH='(.*)'$/\1/" | sed 's/\$/$$/g' | base64 -w0
+# prepare_oci_prereqs.sh reuses existing secrets by name.
+# if you later change duck_token or wg_admin_password_hash_base64 locally,
+# the script will refuse to overwrite the OCI secret unless you pass:
+#   --replace-secret duckdns-token
+#   --replace-secret wg-admin-password-hash-base64
+wg_admin_password_hash_base64 = "JDJhJDEyJHJlcGxhY2VfbWU="
+
+# optional overrides
+# vault_display_name      = "orable-vps-vault"
+# vault_key_display_name  = "orable-vps-bootstrap-key"

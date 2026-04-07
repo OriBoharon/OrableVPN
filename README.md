@@ -1,6 +1,6 @@
 # Oracle Always Free WireGuard VPN
 
-This project builds a personal VPN on Oracle Cloud Infrastructure (OCI) Always Free resources instead of paying for a commercial VPN such as NordVPN or ExpressVPN.
+This project provisions a personal WireGuard VPN on Oracle Cloud Infrastructure Always Free resources.
 
 The goal is simple:
 
@@ -9,59 +9,53 @@ The goal is simple:
 - prioritize security over convenience
 - keep the infrastructure easy to understand and audit
 
-This repository is intentionally conservative. The WireGuard admin UI is not exposed publicly, and remote management is expected to happen from inside the VPN or through SSH port forwarding when needed.
+The repo stays intentionally conservative:
 
-Security-focused improvements, hardening ideas, and pull requests are welcome.
+- keep the instance on an Always Free-compatible shape
+- keep the `wg-easy` admin UI off the public internet
+- preserve WireGuard state on a persistent block volume
+- prefer auditable Terraform and bootstrap logic over convenience shortcuts
 
 ## What This Project Creates
 
 Terraform provisions:
 
-- an OCI VCN
-- a subnet
-- an internet gateway
-- a route table
-- a security list
-- an Ubuntu VM on an Always Free-compatible shape
+- an OCI VCN, subnet, internet gateway, route table, and security list
+- an Ubuntu VM on `VM.Standard.E2.1.Micro`, which stays on the Always Free path
 - a persistent block volume for WireGuard data
+- an OCI dynamic group and policy so the instance can read its runtime secrets with an instance principal
 
 Cloud-init bootstrapping then:
 
-- installs Docker
-- sets persistent SSH host keys
+- installs the OCI CLI and Docker
+- fetches runtime secrets from OCI Vault Secrets at boot
+- writes persistent SSH host keys locally on the instance
+- hardens SSH authentication settings
 - configures DuckDNS updates
-- formats and mounts the data volume
+- mounts the data volume at `/opt/app/vpn/config`
 - starts `wg-easy` with Docker Compose
-
-## Architecture
-
-- Terraform file: [main.tf]
-- Bootstrapping script: [setup.tftpl]
-- Container stack: [docker-compose.yaml]
-- Local variables and secrets: `terraform.tfvars`
 
 ## Security Posture
 
 - `51820/udp` is exposed for WireGuard traffic.
-- `22/tcp` is exposed for SSH.
-- The `wg-easy` web UI port `51821/tcp` is intentionally not exposed to the public internet.
-- The intended management path is:
-  - connect from inside the VPN, or
-  - use SSH local port forwarding as a break-glass option
+- `22/tcp` is exposed for SSH by design.
+- `51821/tcp` is not exposed publicly in OCI and now binds only to `127.0.0.1` on the VM.
+- Management should happen from inside the VPN or through SSH local port forwarding.
 
-If you plan to change that behavior, do it deliberately and review the risk first.
+If you plan to expose the admin UI publicly, review that risk deliberately first.
 
 ## Prerequisites
 
 You will need:
 
 - an Oracle Cloud account
-- access to an OCI compartment where you can create networking, compute, and block volume resources
+- access to an OCI compartment where you can create compute, network, block storage, and IAM policy resources
 - Terraform installed locally
-- the OCI CLI or another way to create and manage API keys
+- an OCI API signing key for Terraform authentication
 - an SSH key pair for logging into the VM
 - a DuckDNS account and subdomain
-- Docker available locally if you want to generate the `wg-easy` password hash the same way shown below
+- Docker available locally if you want to generate the `wg-easy` password hash with the same container image used by the server
+- the OCI CLI installed locally and authenticated against the same tenancy/compartment
 
 ## Required Accounts And Setup
 
@@ -82,7 +76,7 @@ Terraform needs OCI credentials. A common setup is:
 1. Generate an API key pair.
 2. Upload the public key in the OCI console for your user.
 3. Keep the private key on your local machine, for example in `~/.oci/oci_api_key.pem`.
-4. Record the following values for `terraform.tfvars`:
+4. Record the following values for your bootstrap config:
    - `tenancy_ocid`
    - `compartment_id`
    - `user_ocid`
@@ -101,7 +95,7 @@ terraform version
 
 ### 4. Create an SSH Key Pair
 
-Terraform reads your local public key from `~/.ssh/id_rsa.pub` for instance access.
+Terraform reads your local public key from `ssh_authorized_keys_path` for instance access.
 
 If you do not already have one:
 
@@ -109,27 +103,9 @@ If you do not already have one:
 ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa
 ```
 
-Note: if you prefer another SSH key path, update [main.tf] accordingly.
+Note: if you prefer another SSH key path, set `ssh_authorized_keys_path` in `bootstrap.tfvars`.
 
-### 5. Create Persistent SSH Host Keys For The Server
-
-This project injects static SSH host keys into the instance so the host identity stays stable across rebuilds.
-
-Create the `keys` directory and generate the expected files:
-
-```bash
-mkdir -p keys
-ssh-keygen -t ed25519 -f keys/host_key -N ""
-```
-
-That should create:
-
-- `keys/host_key`
-- `keys/host_key.pub`
-
-These files are consumed by [main.tf] and [setup.tftpl].
-
-### 6. Create a DuckDNS Subdomain
+### 5. Create a DuckDNS Subdomain
 
 This project uses DuckDNS so the VPN endpoint has a stable hostname even if the public IP changes.
 
@@ -143,64 +119,136 @@ These are passed into Terraform as:
 - `duck_domain`
 - `duck_token`
 
-### 7. Generate a `wg-easy` Admin Password Hash
+### 6. Generate A Base64-Encoded `wg-easy` Admin Password Hash
 
 Do not store a plaintext admin password in the compose file.
 
-Generate a bcrypt hash locally with Docker:
+Generate the bcrypt hash locally with Docker, strip the `PASSWORD_HASH=` wrapper, escape the $ with $$ and base64-encode only the hash before putting it in `bootstrap.tfvars`:
 
 ```bash
-docker run --rm ghcr.io/wg-easy/wg-easy:14 wgpw 'your-strong-password'
+docker run --rm ghcr.io/wg-easy/wg-easy:14 wgpw 'your-strong-password' | sed -E "s/^PASSWORD_HASH='(.*)'$/\1/" | sed 's/\$/$$/g' | base64 -w0
 ```
 
-Put the resulting hash into:
+Put the resulting value into:
 
-- `wg_admin_password_hash`
+- `wg_admin_password_hash_base64`
 
-Terraform accepts the hash as-is in `terraform.tfvars`. This repo escapes `$` characters only when rendering `docker-compose.yaml`, so you should not pre-escape the bcrypt hash yourself.
+The prep script also normalizes this value before storing it in OCI, so even if you paste the raw `wgpw` output by mistake it will store only the bcrypt hash.
+
+## One-Time Bootstrap Script
+
+For a fresh clone, the easiest path is:
+
+1. Copy the bootstrap template:
+
+```bash
+cp bootstrap.tfvars.example bootstrap.tfvars
+```
+
+2. Fill in your OCI account values, DuckDNS token, and base64-encoded `wg-easy` password hash in `bootstrap.tfvars`.
+
+3. Run the setup script once:
+
+```bash
+./scripts/prepare_oci_prereqs.sh
+```
+
+The script will:
+
+- generate `keys/host_key` and `keys/host_key.pub` if they do not already exist
+- create or reuse an OCI Vault
+- create or reuse an OCI KMS key
+- process the four OCI secrets one at a time and report `created`, `reused`, or `rotated`
+- refuse to overwrite a secret whose content drifted unless you explicitly rotate just that secret
+- write a hardened `terraform.tfvars` containing the resulting secret OCIDs
+- write a local manifest at `scripts/.state/oci_prereqs_manifest.env` with non-secret OCI metadata for future cleanup
+
+You can also pass custom input/output paths:
+
+```bash
+./scripts/prepare_oci_prereqs.sh ./bootstrap.tfvars ./terraform.tfvars
+```
+
+Preview changes without mutating OCI:
+
+```bash
+./scripts/prepare_oci_prereqs.sh --dry-run
+```
+
+Rotate just one secret when your local value changed:
+
+```bash
+./scripts/prepare_oci_prereqs.sh --replace-secret wg-admin-password-hash-base64
+```
+
+## Runtime Secrets
+
+The setup script creates the following OCI Vault Secrets for you:
+
+- `duckdns_token_secret_ocid`
+- `wg_admin_password_hash_base64_secret_ocid`
+- `ssh_host_private_key_secret_ocid`
+- `ssh_host_public_key_secret_ocid`
+
+Recommended secret contents:
+
+- DuckDNS token: the raw token string
+- `wg-easy` hash secret: the base64-encoded bcrypt hash only, without the `PASSWORD_HASH=` wrapper
+- SSH host private key: the full OpenSSH private key contents
+- SSH host public key: the matching `ssh-ed25519 ...` public key line
+
+Example `wg-easy` hash generation:
+
+```bash
+docker run --rm ghcr.io/wg-easy/wg-easy:14 wgpw 'your-strong-password' | sed -E "s/^PASSWORD_HASH='(.*)'$/\\1/" | base64 -w0
+```
+
+Secret behavior is intentionally conservative:
+
+- if a named secret does not exist, the script creates it
+- if a named secret exists and matches your local value, the script reuses it
+- if a named secret exists and differs, the script stops and tells you which `--replace-secret` flag to use
+
+Recommended quick-change path:
+
+- rotate a single secret with `--replace-secret ...` instead of deleting the whole vault stack
+- use the cleanup script only when you truly want to reset OCI prereqs
 
 ## Local Files You Need
 
 Before deployment, make sure you have:
 
 - `terraform.tfvars`
-- `keys/host_key`
-- `keys/host_key.pub`
-- `~/.ssh/id_rsa.pub`
 - your OCI API private key at the path referenced by `private_key_path`
+- the SSH public key referenced by `ssh_authorized_keys_path`
 
-## Create Your Local `terraform.tfvars`
+## Example `terraform.tfvars`
 
-Start by copying the example file:
+After running the bootstrap script, your generated `terraform.tfvars` should look like this:
 
-```bash
-cp terraform.tfvars.example terraform.tfvars
+```hcl
+region                    = "us-ashburn-1"
+tenancy_ocid              = "ocid1.tenancy..."
+compartment_id            = "ocid1.compartment..."
+user_ocid                 = "ocid1.user..."
+fingerprint               = "aa:bb:cc:dd:..."
+private_key_path          = "~/.oci/oci_api_key.pem"
+ssh_authorized_keys_path  = "~/.ssh/id_ed25519.pub"
+duck_domain               = "example.duckdns.org"
+duckdns_token_secret_ocid = "ocid1.vaultsecret.oc1..example"
+wg_admin_password_hash_base64_secret_ocid = "ocid1.vaultsecret.oc1..example"
+ssh_host_private_key_secret_ocid   = "ocid1.vaultsecret.oc1..example"
+ssh_host_public_key_secret_ocid    = "ocid1.vaultsecret.oc1..example"
 ```
-
-Then edit `terraform.tfvars` and replace every placeholder with your real values.
 
 Important:
 
 - `terraform.tfvars` should stay local and untracked
+- `scripts/.state/oci_prereqs_manifest.env` should stay local and untracked
+- Terraform state is still sensitive and should be stored and shared accordingly
+- do not commit real OCIDs, tokens, key material, or password hashes
 - `terraform.tfvars` is intentionally expected to be in `.gitignore`
-- do not commit real OCIDs, tokens, key paths, or password hashes
-- `terraform.tfvars.example` is only a template
-
-## Example `terraform.tfvars`
-
-Do not commit real secrets. Use your own values:
-
-```hcl
-region                  = "us-ashburn-1"
-compartment_id          = "ocid1.compartment..."
-tenancy_ocid            = "ocid1.tenancy..."
-user_ocid                 = "ocid1.user..."
-fingerprint             = "aa:bb:cc:dd:..."
-private_key_path        = "~/.oci/oci_api_key.pem"
-duck_domain             = "example.duckdns.org"
-duck_token              = "duckdns-token"
-wg_admin_password_hash  = "$2a$12$..."
-```
+- `bootstrap.tfvars` is also intentionally local and should not be committed
 
 ## Deployment
 
@@ -229,12 +277,12 @@ Terraform should output the instance public IP and OCI instance ID when complete
 Normal operation:
 
 - connect to the WireGuard VPN on `51820/udp`
-- manage the service from inside the VPN
+- manage the service from inside the VPN when possible
 
 Break-glass web UI access with SSH local forwarding:
 
 ```bash
-ssh -L 51821:localhost:51821 ubuntu@YOUR_SERVER_IP
+ssh -L 51821:127.0.0.1:51821 ubuntu@YOUR_SERVER_IP
 ```
 
 Then open:
@@ -243,14 +291,46 @@ Then open:
 http://localhost:51821
 ```
 
-This keeps the management UI off the public internet.
+## State And Secret Handling
 
-## Notes And Assumptions
+- The instance retrieves secrets from OCI at boot using an instance principal.
+- Terraform state still contains infrastructure metadata and secret OCIDs, so treat it as sensitive operational data.
+- The prereq script tags OCI vault resources it creates and records their OCIDs in `scripts/.state/oci_prereqs_manifest.env`.
 
-- The OCI region is user-defined through `terraform.tfvars`.
-- The current instance shape is `VM.Standard.E2.1.Micro`.
-- The Docker volume data for WireGuard is mounted under `/opt/app/vpn/config`.
-- DuckDNS is updated on boot and every 5 minutes afterward.
+## Cleanup
+
+Use the cleanup helper to remove the OCI prereqs created by the bootstrap script:
+
+```bash
+./scripts/delete_oci_prereqs.sh
+```
+
+By default it runs in dry-run mode and shows what it would delete.
+
+Execute the cleanup:
+
+```bash
+./scripts/delete_oci_prereqs.sh --execute
+```
+
+Cleanup behavior:
+
+- schedules each known runtime secret for deletion individually first
+- then attempts to schedule vault deletion for 7 days out
+- refuses vault deletion if the vault is not tagged as project-managed
+- refuses vault deletion if unexpected or unmanaged active secrets are still present
+- leaves the key in place when vault deletion is blocked
+
+Important OCI note:
+
+- vault and secret deletion is scheduled, not immediate
+- the script uses the minimum supported OCI retention window of 7 days
+
+## Notes
+
+- The current `wg-easy` image is pinned to `ghcr.io/wg-easy/wg-easy:14`.
+- The block volume is mounted at `/opt/app/vpn/config`.
+- DuckDNS is updated on boot and every 5 minutes after boot.
 
 ## Security Recommendations
 
@@ -259,7 +339,6 @@ This keeps the management UI off the public internet.
 - restrict access to your OCI account with MFA
 - review Terraform changes before every apply
 - rotate credentials if you suspect exposure
-- prefer private management paths over opening new firewall ports
 
 ## Contributing
 
