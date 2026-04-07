@@ -52,7 +52,6 @@ You will need:
 - access to an OCI compartment where you can create compute, network, block storage, and IAM policy resources
 - Terraform installed locally
 - an OCI API signing key for Terraform authentication
-- an SSH key pair for logging into the VM
 - a DuckDNS account and subdomain
 - Docker available locally if you want to generate the `wg-easy` password hash with the same container image used by the server
 - the OCI CLI installed locally and authenticated against the same tenancy/compartment
@@ -133,7 +132,6 @@ Put the resulting value into:
 
 - `wg_admin_password_hash_base64`
 
-The prep script also normalizes this value before storing it in OCI, so even if you paste the raw `wgpw` output by mistake it will store only the bcrypt hash.
 
 ## One-Time Bootstrap Script
 
@@ -189,19 +187,6 @@ The setup script creates the following OCI Vault Secrets for you:
 - `wg_admin_password_hash_base64_secret_ocid`
 - `ssh_host_private_key_secret_ocid`
 - `ssh_host_public_key_secret_ocid`
-
-Recommended secret contents:
-
-- DuckDNS token: the raw token string
-- `wg-easy` hash secret: the base64-encoded bcrypt hash only, without the `PASSWORD_HASH=` wrapper
-- SSH host private key: the full OpenSSH private key contents
-- SSH host public key: the matching `ssh-ed25519 ...` public key line
-
-Example `wg-easy` hash generation:
-
-```bash
-docker run --rm ghcr.io/wg-easy/wg-easy:14 wgpw 'your-strong-password' | sed -E "s/^PASSWORD_HASH='(.*)'$/\\1/" | base64 -w0
-```
 
 Secret behavior is intentionally conservative:
 

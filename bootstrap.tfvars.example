@@ -17,5 +17,5 @@ duck_token              = "replace_me"
 wg_admin_password_hash_base64 = "JDJhJDEyJHJlcGxhY2VfbWU="
 
 # optional overrides
-# vault_display_name      = "orable-vps-vault"
-# vault_key_display_name  = "orable-vps-bootstrap-key"
+# vault_display_name      = "orable-vpn-vault"
+# vault_key_display_name  = "orable-vpn-bootstrap-key"
