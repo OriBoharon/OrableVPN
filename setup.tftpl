@@ -11,7 +11,7 @@ echo "--- DEPLOYMENT STARTED: $(date) ---"
 sleep 5
 
 apt-get update
-apt-get install -y ca-certificates curl jq python3 unzip
+apt-get install -y ca-certificates curl iptables jq python3 unzip
 
 # Install OCI CLI so the instance can fetch runtime secrets with its instance principal.
 export PATH="/root/bin:/usr/local/bin:$PATH"
@@ -117,6 +117,39 @@ while [ ! -S /var/run/docker.sock ]; do
   echo "Waiting for Docker socket..."
   sleep 2
 done
+
+# Restrict the wg-easy UI to VPN clients and localhost, even if outer firewall rules drift.
+cat <<'EOF' > /usr/local/sbin/refresh-wg-ui-firewall.sh
+#!/bin/bash
+set -euo pipefail
+
+iptables -w -N ORABLE_WG_UI 2>/dev/null || true
+iptables -w -F ORABLE_WG_UI
+iptables -w -C DOCKER-USER -j ORABLE_WG_UI 2>/dev/null || iptables -w -I DOCKER-USER 1 -j ORABLE_WG_UI
+iptables -w -A ORABLE_WG_UI -i wg0 -p tcp --dport 51821 -j RETURN
+iptables -w -A ORABLE_WG_UI -i lo -p tcp --dport 51821 -j RETURN
+iptables -w -A ORABLE_WG_UI -p tcp --dport 51821 -j DROP
+iptables -w -A ORABLE_WG_UI -j RETURN
+EOF
+chmod 700 /usr/local/sbin/refresh-wg-ui-firewall.sh
+
+cat <<'EOF' > /etc/systemd/system/wg-ui-firewall.service
+[Unit]
+Description=Restrict wg-easy UI to VPN clients and localhost
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/refresh-wg-ui-firewall.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now wg-ui-firewall.service
 
 # Mount persistent VPN data volume.
 VPN_DATA_DEVICE="${vpn_data_device}"

@@ -39,7 +39,8 @@ Cloud-init bootstrapping then:
 
 - `51820/udp` is exposed for WireGuard traffic.
 - `22/tcp` is exposed for SSH by design.
-- `51821/tcp` is not exposed publicly in OCI and now binds only to `127.0.0.1` on the VM.
+- `51821/tcp` is not exposed publicly in OCI.
+- The instance also drops non-VPN traffic to `51821/tcp` with a host-side `iptables` rule.
 - Management should happen from inside the VPN or through SSH local port forwarding.
 
 If you plan to expose the admin UI publicly, review that risk deliberately first.
