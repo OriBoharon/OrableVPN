@@ -27,7 +27,7 @@ This repository provisions and bootstraps a small Oracle Cloud VPS that runs Wir
 ## Implementation Notes
 
 - The instance shape is intended to stay on the Always Free path unless the user asks otherwise.
-- The boot script expects persistent SSH host keys at `keys/host_key` and `keys/host_key.pub`.
+- The boot script now expects OCI Secret OCIDs for the persistent SSH host keypair, DuckDNS token, and `wg-easy` admin password hash.
 - The block volume is mounted at `/opt/app/vpn/config` so WireGuard state survives instance replacement/reboot.
 - DuckDNS is updated both immediately at boot and every 5 minutes via cron.
 
@@ -35,9 +35,13 @@ This repository provisions and bootstraps a small Oracle Cloud VPS that runs Wir
 
 - Prefer minimal, targeted changes over broad refactors.
 - Keep Terraform and bootstrap logic easy to audit.
+- Do not include real secrets or personal machine-specific values in git-tracked files.
+- This includes passwords, password hashes, API tokens, private keys, OCIDs tied to a real account, and personal local paths such as home-directory-specific key locations.
 - Do not expose secrets in logs, docs, or example output.
 - Be careful with `terraform.tfvars`; avoid echoing tokens, hashes, OCIDs, or key paths back to the user unless necessary.
 - If changing networking, call out user-facing access changes explicitly.
+- Whenever changes to the README.md are necessary, keep them minimal and edit only the relevant parts while keeping the tone of the original file 
+
 
 ## Useful Defaults For Future Codex Sessions
 

@@ -1,42 +1,103 @@
 #!/bin/bash
+set -euo pipefail
+umask 077
 
-# This sends everything to the Serial Console (/dev/ttyS0)
-exec > >(tee -a /var/log/cloud-init-output.log /dev/ttyS0) 2>&1
+# Keep bootstrap logs local so secrets never reach the serial console.
+exec >> /var/log/bootstrap.log 2>&1
 
 echo "--- DEPLOYMENT STARTED: $(date) ---"
 
-# write static host keys to ensure they persist
-# across reboots (and aren't regenerated, which would break SSH access)
-cat <<EOF > /etc/ssh/ssh_host_ed25519_key
-${ssh_host_key_private}
-EOF
-
-cat <<EOF > /etc/ssh/ssh_host_ed25519_key.pub
-${ssh_host_key_public}
-EOF
-
-# 2. Set strict permissions (SSH will refuse to start if these are wrong)
-chmod 600 /etc/ssh/ssh_host_ed25519_key
-chmod 644 /etc/ssh/ssh_host_ed25519_key.pub
-
-systemctl restart sshd
-
-# 1. Wait for system locks to clear
+# Wait for package-manager locks to clear.
 sleep 5
 
-# 2. Setup DuckDNS
-mkdir -p /opt/app/duckdns
-echo 'echo url="https://www.duckdns.org/update?domains=${duck_domain}&token=${duck_token}&ip=" | curl -k -K -' > /opt/app/duckdns/duck.sh
-chmod +x /opt/app/duckdns/duck.sh
-(crontab -l 2>/dev/null; echo "*/5 * * * * /opt/app/duckdns/duck.sh") | crontab -
-
-# Trigger DNS update IMMEDIATELY ---
-echo "Triggering immediate DNS update..."
-/opt/app/duckdns/duck.sh
-
-# 3. Install Docker (The official way)
 apt-get update
-apt-get install -y ca-certificates curl
+apt-get install -y ca-certificates curl iptables jq python3 unzip
+
+# Install OCI CLI so the instance can fetch runtime secrets with its instance principal.
+export PATH="/root/bin:/usr/local/bin:$PATH"
+if ! command -v oci >/dev/null 2>&1; then
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
+fi
+
+OCI_BIN="$(command -v oci)"
+OCI_REGION="$(curl -fsSL -H 'Authorization: Bearer Oracle' http://169.254.169.254/opc/v2/instance/ | jq -r '.canonicalRegionName // .region')"
+
+fetch_secret() {
+  local secret_id="$1"
+  local attempt=1
+  local delay=5
+  local secret_value
+
+  while [ "$attempt" -le 12 ]; do
+    if secret_value="$("$OCI_BIN" secrets secret-bundle get \
+      --auth instance_principal \
+      --region "$OCI_REGION" \
+      --secret-id "$secret_id" \
+      --stage CURRENT \
+      --query 'data."secret-bundle-content".content' \
+      --raw-output 2>/dev/null | base64 --decode 2>/dev/null)"; then
+      printf '%s' "$secret_value"
+      return 0
+    fi
+
+    echo "Waiting for instance principal access to become available (attempt $${attempt}/12)..."
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    if [ "$delay" -lt 60 ]; then
+      delay=$((delay * 2))
+      if [ "$delay" -gt 60 ]; then
+        delay=60
+      fi
+    fi
+  done
+
+  echo "Failed to retrieve required runtime secrets via instance principal." >&2
+  return 1
+}
+
+DUCKDNS_TOKEN="$(fetch_secret "${duckdns_token_secret_ocid}")"
+WG_ADMIN_PASSWORD_HASH_BASE64="$(fetch_secret "${wg_admin_password_hash_base64_secret_ocid}")"
+SSH_HOST_PRIVATE_KEY="$(fetch_secret "${ssh_host_private_key_secret_ocid}")"
+SSH_HOST_PUBLIC_KEY="$(fetch_secret "${ssh_host_public_key_secret_ocid}")"
+WG_ADMIN_PASSWORD_HASH="$(printf '%s' "$${WG_ADMIN_PASSWORD_HASH_BASE64}" | base64 --decode)"
+
+# Write static host keys to ensure they persist across reboots.
+install -m 600 /dev/null /etc/ssh/ssh_host_ed25519_key
+printf '%s\n' "$SSH_HOST_PRIVATE_KEY" > /etc/ssh/ssh_host_ed25519_key
+
+install -m 644 /dev/null /etc/ssh/ssh_host_ed25519_key.pub
+printf '%s\n' "$SSH_HOST_PUBLIC_KEY" > /etc/ssh/ssh_host_ed25519_key.pub
+
+install -d -m 755 /etc/ssh/sshd_config.d
+cat <<'EOF' > /etc/ssh/sshd_config.d/10-orable-hardening.conf
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitRootLogin no
+PubkeyAuthentication yes
+EOF
+
+systemctl restart sshd || systemctl restart ssh
+
+# Setup DuckDNS with root-only permissions.
+install -d -m 700 /opt/app/duckdns
+DUCKDNS_LABEL="${duck_domain}"
+DUCKDNS_LABEL="$${DUCKDNS_LABEL%.duckdns.org}"
+cat <<EOF > /opt/app/duckdns/duck.sh
+#!/bin/bash
+set -euo pipefail
+curl --fail --silent --show-error "https://www.duckdns.org/update?domains=$${DUCKDNS_LABEL}&token=$${DUCKDNS_TOKEN}&ip="
+EOF
+chmod 700 /opt/app/duckdns/duck.sh
+{
+  (crontab -l 2>/dev/null || true) | grep -v '/opt/app/duckdns/duck.sh' || true
+  echo "*/5 * * * * DUCKDNS_TOKEN='$${DUCKDNS_TOKEN}' /opt/app/duckdns/duck.sh"
+} | crontab -
+
+echo "Triggering immediate DNS update..."
+DUCKDNS_TOKEN="$${DUCKDNS_TOKEN}" /opt/app/duckdns/duck.sh
+
+# Install Docker (The official way).
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
@@ -51,13 +112,46 @@ apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin do
 
 systemctl enable --now docker
 
-# Wait until the docker socket exists before continuing
+# Wait until the docker socket exists before continuing.
 while [ ! -S /var/run/docker.sock ]; do
   echo "Waiting for Docker socket..."
   sleep 2
 done
 
-# 4. Mount persistent VPN data volume
+# Restrict the wg-easy UI to VPN clients and localhost, even if outer firewall rules drift.
+cat <<'EOF' > /usr/local/sbin/refresh-wg-ui-firewall.sh
+#!/bin/bash
+set -euo pipefail
+
+iptables -w -N ORABLE_WG_UI 2>/dev/null || true
+iptables -w -F ORABLE_WG_UI
+iptables -w -C DOCKER-USER -j ORABLE_WG_UI 2>/dev/null || iptables -w -I DOCKER-USER 1 -j ORABLE_WG_UI
+iptables -w -A ORABLE_WG_UI -i wg0 -p tcp --dport 51821 -j RETURN
+iptables -w -A ORABLE_WG_UI -i lo -p tcp --dport 51821 -j RETURN
+iptables -w -A ORABLE_WG_UI -p tcp --dport 51821 -j DROP
+iptables -w -A ORABLE_WG_UI -j RETURN
+EOF
+chmod 700 /usr/local/sbin/refresh-wg-ui-firewall.sh
+
+cat <<'EOF' > /etc/systemd/system/wg-ui-firewall.service
+[Unit]
+Description=Restrict wg-easy UI to VPN clients and localhost
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/refresh-wg-ui-firewall.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now wg-ui-firewall.service
+
+# Mount persistent VPN data volume.
 VPN_DATA_DEVICE="${vpn_data_device}"
 VPN_DATA_MOUNT="/opt/app/vpn/config"
 
@@ -78,8 +172,12 @@ fi
 
 mountpoint -q "$VPN_DATA_MOUNT" || mount "$VPN_DATA_MOUNT"
 
-# 5. Write Docker Compose and Start
+# Write Docker Compose and start the stack.
 mkdir -p /opt/app/vpn
+install -m 600 /dev/null /opt/app/vpn/.env
+printf 'DUCK_DOMAIN=%s\n' "${duck_domain}" > /opt/app/vpn/.env
+printf 'WG_ADMIN_PASSWORD_HASH=%s\n' "$${WG_ADMIN_PASSWORD_HASH}" >> /opt/app/vpn/.env
+
 cat <<'EOF' > /opt/app/vpn/docker-compose.yaml
 ${docker_compose_content}
 EOF
