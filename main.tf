@@ -67,7 +67,7 @@ variable "ssh_host_public_key_secret_ocid" {
 }
 
 locals {
-  project_name             = "orable-vps"
+  project_name             = "orable-vpn"
   instance_principal_group = "${local.project_name}-instance-principals"
   instance_secret_policy   = "${local.project_name}-secret-readers"
 }
