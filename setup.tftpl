@@ -7,11 +7,43 @@ exec >> /var/log/bootstrap.log 2>&1
 
 echo "--- DEPLOYMENT STARTED: $(date) ---"
 
-# Wait for package-manager locks to clear.
+# Wait for package-manager locks to clear and network to be ready.
 sleep 5
 
-apt-get update
-apt-get install -y ca-certificates curl iptables jq python3 unzip
+# Wait for DNS resolution to be available.
+echo "Waiting for DNS resolution..."
+attempt=1
+while [ "$attempt" -le 30 ]; do
+  if getent hosts archive.ubuntu.com >/dev/null 2>&1; then
+    echo "DNS resolution is available."
+    break
+  fi
+  echo "Waiting for DNS (attempt $attempt/30)..."
+  sleep 2
+  attempt=$((attempt + 1))
+done
+
+# Update package lists with retries.
+attempt=1
+while [ "$attempt" -le 5 ]; do
+  if apt-get update; then
+    break
+  fi
+  echo "apt-get update failed (attempt $attempt/5), retrying..."
+  sleep 10
+  attempt=$((attempt + 1))
+done
+
+# Install packages with retries.
+attempt=1
+while [ "$attempt" -le 5 ]; do
+  if apt-get install -y ca-certificates curl iptables jq python3 unzip; then
+    break
+  fi
+  echo "apt-get install failed (attempt $attempt/5), retrying..."
+  sleep 10
+  attempt=$((attempt + 1))
+done
 
 # Install OCI CLI so the instance can fetch runtime secrets with its instance principal.
 export PATH="/root/bin:/usr/local/bin:$PATH"
