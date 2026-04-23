@@ -15,6 +15,7 @@ The repo stays intentionally conservative:
 - keep the `wg-easy` admin UI off the public internet
 - preserve WireGuard state on a persistent block volume
 - prefer auditable Terraform and bootstrap logic over convenience shortcuts
+- optionally manage tenancy-wide OCI guardrails that keep quota-covered resources inside documented Always Free limits
 
 Security note: `51821/tcp` is intentionally not exposed publicly. Management should happen from inside the VPN or through SSH local port forwarding.
 
@@ -67,6 +68,8 @@ terraform apply
 That is the supported happy path:
 `bootstrap.tfvars.example` -> `bootstrap.tfvars` -> `prepare_oci_prereqs.sh` -> `terraform apply`
 
+If you leave the default guardrail toggles enabled, Terraform will also manage tenancy-wide OCI quotas and budget alerts from the tenancy root compartment. Those settings affect more than this VPN project.
+
 ## What This Creates
 
 Terraform provisions:
@@ -75,6 +78,8 @@ Terraform provisions:
 - an Ubuntu VM on `VM.Standard.E2.1.Micro`, which stays on the Always Free path
 - a persistent block volume for WireGuard data
 - an OCI dynamic group and policy so the instance can read its runtime secrets with an instance principal
+- tenancy-wide quotas that mirror key documented Always Free compute and storage limits
+- tenancy-wide budget alerts that notify if unexpected non-free spend appears
 
 Cloud-init bootstrapping then:
 
@@ -136,6 +141,27 @@ http://localhost:51821
 ```
 
 If you plan to expose the admin UI publicly, review that risk deliberately first.
+
+## Tenancy Guardrails
+
+This repo can now manage two tenancy-wide OCI safety layers from Terraform:
+
+- hard guardrails with quota policies in the tenancy root compartment
+- soft tripwires with budget alerts in the tenancy root compartment
+
+The default quota set is intentionally conservative:
+
+- allow `VM.Standard.E2.1.Micro` up to the documented Always Free E2 micro quota
+- allow `VM.Standard.A1.Flex` up to the documented Always Free A1 core and memory quota, including the regional A1 quota names OCI may enforce during launch
+- allow the shared boot-plus-block storage pool and backup count documented for Always Free
+- deny common paid-prone services such as load balancers, compute autoscaling/pools, and managed database families by default
+
+Important:
+
+- budgets do not block spend; they only alert
+- quota policies are the enforcement layer for quota-covered services
+- tenancy-wide quota and budget resources affect more than this VPN stack
+- OCI can change Always Free limits over time, so review these values before changing them
 
 ## Cleanup
 

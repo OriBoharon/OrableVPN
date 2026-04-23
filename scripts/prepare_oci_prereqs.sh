@@ -172,6 +172,7 @@ duck_domain="$(require_value duck_domain)"
 duck_token="$(require_value duck_token)"
 wg_admin_password_hash_base64="$(require_value wg_admin_password_hash_base64)"
 ssh_authorized_keys_path="$(read_tfvar ssh_authorized_keys_path)"
+budget_alert_recipients="$(read_tfvar budget_alert_recipients)"
 vault_name="$(read_tfvar vault_display_name)"
 key_name="$(read_tfvar vault_key_display_name)"
 
@@ -463,6 +464,7 @@ duckdns_token_secret_ocid = "${duckdns_token_secret_ocid}"
 wg_admin_password_hash_base64_secret_ocid = "${wg_admin_password_hash_base64_secret_ocid}"
 ssh_host_private_key_secret_ocid   = "${ssh_host_private_key_secret_ocid}"
 ssh_host_public_key_secret_ocid    = "${ssh_host_public_key_secret_ocid}"
+budget_alert_recipients   = "${budget_alert_recipients}"
 EOF
   chmod 600 "$OUTPUT_FILE"
 fi

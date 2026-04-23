@@ -19,3 +19,4 @@ wg_admin_password_hash_base64 = "JDJhJDEyJHJlcGxhY2VfbWU="
 # optional overrides
 # vault_display_name      = "orable-vpn-vault"
 # vault_key_display_name  = "orable-vpn-bootstrap-key"
+# budget_alert_recipients = "you@example.com"
