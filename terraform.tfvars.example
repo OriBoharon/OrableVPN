@@ -10,3 +10,20 @@ duckdns_token_secret_ocid = "ocid1.vaultsecret.oc1..replace_me"
 wg_admin_password_hash_base64_secret_ocid = "ocid1.vaultsecret.oc1..replace_me"
 ssh_host_private_key_secret_ocid   = "ocid1.vaultsecret.oc1..replace_me"
 ssh_host_public_key_secret_ocid    = "ocid1.vaultsecret.oc1..replace_me"
+budget_alert_recipients   = "you@example.com"
+
+# tenancy-wide guardrails
+# these quotas are managed in the tenancy root compartment and affect more than this VPN project
+# budgets are alert-only tripwires; they do not block spend
+# enable_tenancy_always_free_guardrails = true
+# enable_tenancy_budget_alerts          = true
+# always_free_a1_ocpus                  = 4
+# always_free_a1_memory_gb              = 24
+# always_free_e2_micro_ocpus            = 2
+# always_free_total_storage_gb          = 200
+# always_free_backup_count              = 5
+# monthly_safety_budget_amount          = 1
+
+# local stack guardrails
+# instance_shape         = "VM.Standard.E2.1.Micro"
+# vpn_data_volume_size_gb = 50
